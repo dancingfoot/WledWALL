@@ -1,0 +1,6 @@
+{
+  "name": "WLED Video Sync",
+  "description": "Stream video files, webcam, screen capture, and procedural effects directly to WLED devices using DDP, DRGB, WARLS, and Art-Net/sACN protocols.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
