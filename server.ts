@@ -20,6 +20,7 @@ udpSocket.on('error', (err) => {
 // Art-Net sequence counter
 let artnetSeq = 0;
 let ddpSeq = 0;
+let e131Seq = 0;
 
 // Set up WebSocket server attached to the HTTP server
 const wss = new WebSocketServer({ noServer: true });
@@ -34,7 +35,7 @@ wss.on('connection', (ws: WebSocket) => {
 
       if (!ip || !pixels || !Array.isArray(pixels)) return;
 
-      const targetPort = Number(port) || (protocol === 'DDP' ? 4048 : protocol === 'Art-Net' ? 6454 : 21324);
+      const targetPort = Number(port) || (protocol === 'DDP' ? 4048 : protocol === 'Art-Net' ? 6454 : protocol === 'E1.31' ? 5568 : 21324);
       let buffer: Buffer;
 
       if (protocol === 'DDP') {
@@ -123,6 +124,46 @@ wss.on('connection', (ws: WebSocket) => {
 
         const dmxData = Buffer.from(pixels.slice(0, channelCount));
         buffer = Buffer.concat([artHeader, dmxData]);
+      } else if (protocol === 'E1.31') {
+        // Build sACN (E1.31) Data Packet (port 5568)
+        // Total header is 126 bytes
+        const e131Header = Buffer.alloc(126);
+        e131Seq = (e131Seq + 1) & 0xFF;
+
+        const channels = Math.min(pixels.length, 512);
+
+        // --- Root Layer ---
+        e131Header.writeUInt16BE(0x0010, 0); // Preamble size
+        e131Header.writeUInt16BE(0x0000, 2); // Post-amble size
+        e131Header.write('ASC-E1.17\0\0\0', 4, 12, 'ascii'); // Packet Identifier
+        e131Header.writeUInt16BE(0x7000 | (110 + channels), 16); // Flags & Length (Root Layer)
+        e131Header.writeUInt32BE(0x00000004, 18); // Vector (Root Vector for Data Packet)
+        
+        // CID (Component Identifier - 16 bytes unique ID)
+        const cid = Buffer.from([0x2d, 0x8a, 0x48, 0x11, 0xe0, 0x9c, 0x4d, 0x9e, 0xb8, 0xd0, 0xa1, 0x58, 0xd4, 0x07, 0xf0, 0x36]);
+        cid.copy(e131Header, 22);
+
+        // --- Framing Layer ---
+        e131Header.writeUInt16BE(0x7000 | (88 + channels), 38); // Flags & Length (Framing Layer)
+        e131Header.writeUInt32BE(0x00000002, 40); // Vector (sACN vector)
+        e131Header.write('WLED Video Sync', 44, 64, 'ascii'); // Source Name (max 64 bytes)
+        e131Header.writeUInt8(100, 108); // Priority (0-200, default 100)
+        e131Header.writeUInt16BE(0x0000, 109); // Synchronization Address (0 to disable)
+        e131Header.writeUInt8(e131Seq, 111); // Sequence Number
+        e131Header.writeUInt8(0, 112); // Options
+        e131Header.writeUInt16BE(1, 113); // Universe (Default inside WLED is 1)
+
+        // --- DMP Layer ---
+        e131Header.writeUInt16BE(0x7000 | (11 + channels), 115); // Flags & Length (DMP Layer)
+        e131Header.writeUInt8(0x02, 117); // Vector
+        e131Header.writeUInt8(0xa1, 118); // Address Type & Data Type
+        e131Header.writeUInt16BE(0x0000, 119); // First Property Address
+        e131Header.writeUInt16BE(0x0001, 121); // Address Increment
+        e131Header.writeUInt16BE(channels + 1, 123); // Property value count
+        e131Header.writeUInt8(0x00, 125); // DMX Start Code (0x00)
+
+        const dmxData = Buffer.from(pixels.slice(0, channels));
+        buffer = Buffer.concat([e131Header, dmxData]);
       } else {
         return;
       }

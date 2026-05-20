@@ -1,8 +1,75 @@
 import { useState, useEffect, useRef, ChangeEvent } from 'react';
-import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2 } from 'lucide-react';
-import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats } from './types';
+import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye } from 'lucide-react';
+import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
+
+// ---- Pixel sampling high-fidelity helpers ----
+const getPixelColor = (x: number, y: number, width: number, height: number, data: Uint8ClampedArray) => {
+  const cx = Math.max(0, Math.min(width - 1, Math.round(x)));
+  const cy = Math.max(0, Math.min(height - 1, Math.round(y)));
+  const idx = (cy * width + cx) * 4;
+  return {
+    r: data[idx] !== undefined ? data[idx] : 0,
+    g: data[idx + 1] !== undefined ? data[idx + 1] : 0,
+    b: data[idx + 2] !== undefined ? data[idx + 2] : 0,
+  };
+};
+
+const getZoneAverage = (zone: AccentMappingZone, W: number, H: number, data: Uint8ClampedArray) => {
+  let rSum = 0, gSum = 0, bSum = 0, count = 0;
+  let startX = 0, endX = W, startY = 0, endY = H;
+
+  switch (zone) {
+    case AccentMappingZone.CENTER:
+      startX = Math.floor(W / 4);
+      endX = Math.ceil((3 * W) / 4);
+      startY = Math.floor(H / 4);
+      endY = Math.ceil((3 * H) / 4);
+      break;
+    case AccentMappingZone.TOP:
+      startY = 0;
+      endY = Math.max(1, Math.floor(H / 6));
+      break;
+    case AccentMappingZone.BOTTOM:
+      startY = Math.max(0, H - Math.max(1, Math.floor(H / 6)));
+      endY = H;
+      break;
+    case AccentMappingZone.LEFT:
+      startX = 0;
+      endX = Math.max(1, Math.floor(W / 6));
+      break;
+    case AccentMappingZone.RIGHT:
+      startX = Math.max(0, W - Math.max(1, Math.floor(W / 6)));
+      endX = W;
+      break;
+    case AccentMappingZone.WHOLE_AVERAGE:
+    default:
+      break;
+  }
+
+  if (startX >= endX) endX = startX + 1;
+  if (startY >= endY) endY = startY + 1;
+
+  for (let y = startY; y < endY; y++) {
+    for (let x = startX; x < endX; x++) {
+      const idx = (y * W + x) * 4;
+      if (idx < data.length) {
+        rSum += data[idx];
+        gSum += data[idx + 1];
+        bSum += data[idx + 2];
+        count++;
+      }
+    }
+  }
+
+  if (count === 0) return { r: 0, g: 0, b: 0 };
+  return {
+    r: Math.round(rSum / count),
+    g: Math.round(gSum / count),
+    b: Math.round(bSum / count),
+  };
+};
 
 export default function App() {
   // ---- Config States ----
@@ -36,6 +103,45 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [screenShareError, setScreenShareError] = useState<string | null>(null);
+
+  // ---- NDI & Multi-Output State Hooks ----
+  const [ndiStreamUrl, setNdiStreamUrl] = useState<string>('http://192.168.1.150:8080/video');
+  const [useSimulatedNdi, setUseSimulatedNdi] = useState<boolean>(true);
+  const streamImgRef = useRef<HTMLImageElement | null>(null);
+
+  const [auxiliaryTargets, setAuxiliaryTargets] = useState<AuxiliaryTarget[]>([
+    {
+      id: 'lightpack-1',
+      name: 'LCD Backlight Ambilight',
+      type: TargetType.AMBIENT_LIGHTPACK,
+      enabled: false,
+      ipAddress: '192.168.1.101',
+      port: 5568,
+      protocol: SyncProtocol.E131,
+      topLedCount: 12,
+      rightLedCount: 8,
+      bottomLedCount: 12,
+      leftLedCount: 8,
+      mappedZone: AccentMappingZone.WHOLE_AVERAGE,
+      accentLedCount: 40
+    },
+    {
+      id: 'accent-bulb-1',
+      name: 'Dynamic Desk Spotlight',
+      type: TargetType.INDIVIDUAL_ACCENT,
+      enabled: false,
+      ipAddress: '192.168.1.102',
+      port: 4048,
+      protocol: SyncProtocol.DDP,
+      topLedCount: 0,
+      rightLedCount: 0,
+      bottomLedCount: 0,
+      leftLedCount: 0,
+      mappedZone: AccentMappingZone.CENTER,
+      accentLedCount: 30
+    }
+  ]);
+  const [auxPixels, setAuxPixels] = useState<{ [key: string]: Uint8Array }>({});
 
   // ---- Server Connection States ----
   const [socketStatus, setSocketStatus] = useState<'CONNECTED' | 'DISCONNECTED' | 'CONNECTING'>('DISCONNECTED');
@@ -78,8 +184,42 @@ export default function App() {
     let port = 21324; // DRGB & WARLS
     if (protocol === SyncProtocol.DDP) port = 4048;
     if (protocol === SyncProtocol.ARTNET) port = 6454;
+    if (protocol === SyncProtocol.E131) port = 5568;
     
     setWledConfig(prev => ({ ...prev, protocol, port }));
+  };
+
+  // ---- Auxiliary State mutator handlers ----
+  const handleToggleAux = (id: string) => {
+    setAuxiliaryTargets(prev => prev.map(t => t.id === id ? { ...t, enabled: !t.enabled } : t));
+  };
+
+  const handleUpdateAux = (id: string, updates: Partial<AuxiliaryTarget>) => {
+    setAuxiliaryTargets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+  };
+
+  const handleAddAux = () => {
+    const newId = `custom-lamp-${Date.now()}`;
+    const newTarget: AuxiliaryTarget = {
+      id: newId,
+      name: `Accents Spotlight #${auxiliaryTargets.length + 1}`,
+      type: TargetType.INDIVIDUAL_ACCENT,
+      enabled: true,
+      ipAddress: '192.168.1.115',
+      port: 4048,
+      protocol: SyncProtocol.DDP,
+      topLedCount: 0,
+      rightLedCount: 0,
+      bottomLedCount: 0,
+      leftLedCount: 0,
+      mappedZone: AccentMappingZone.WHOLE_AVERAGE,
+      accentLedCount: 30
+    };
+    setAuxiliaryTargets(prev => [...prev, newTarget]);
+  };
+
+  const handleRemoveAux = (id: string) => {
+    setAuxiliaryTargets(prev => prev.filter(t => t.id !== id));
   };
 
   // ---- WebSocket Connection Handler ----
@@ -306,6 +446,43 @@ export default function App() {
             analyserRef.current.getByteFrequencyData(audioBufferRef.current);
           }
           renderProceduralEffect(ctx, W, H, activeEffect, timestamp / 1000, audioBufferRef.current || undefined);
+        } else if (activeSource === SourceType.NDI_IP_STREAM) {
+          if (useSimulatedNdi) {
+            // Draw SMPTE test bars pattern with dynamic movement sweep
+            ctx.fillStyle = '#08080a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw color blocks
+            const barW = Math.max(1, W / 6);
+            const colors = ['#ffffff', '#eab308', '#06b6d4', '#22c55e', '#ec4899', '#ef4444'];
+            colors.forEach((col, idx) => {
+              ctx.fillStyle = col;
+              ctx.fillRect(idx * barW, 0, barW, Math.round(H * 0.7));
+            });
+
+            // Sweep visual bar
+            const sweepInterval = (timestamp / 1000) % (W * 2);
+            const lineX = sweepInterval > W ? W * 2 - sweepInterval : sweepInterval;
+            ctx.strokeStyle = '#f97316';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(lineX, 0);
+            ctx.lineTo(lineX, H);
+            ctx.stroke();
+
+            // Intersecting dynamic sine pulse orb
+            const orbX = (Math.sin(timestamp / 600) + 1) * 0.5 * W;
+            const orbY = (Math.cos(timestamp / 400) + 1) * 0.5 * H;
+            ctx.fillStyle = '#3b82f6';
+            ctx.beginPath();
+            ctx.arc(orbX, orbY, Math.max(1, W / 7), 0, Math.PI * 2);
+            ctx.fill();
+          } else if (streamImgRef.current) {
+            ctx.drawImage(streamImgRef.current, 0, 0, W, H);
+          } else {
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(0, 0, W, H);
+          }
         } else if (videoRef.current && isPlaying) {
           const video = videoRef.current;
           // Canvas fit adjustments
@@ -396,6 +573,88 @@ export default function App() {
           statsTracker.current.packets += 1;
         }
 
+        // ---- Calculate and Stream Auxiliary Outputs ----
+        const newAuxPixels: { [key: string]: Uint8Array } = {};
+
+        auxiliaryTargets.forEach((target) => {
+          if (!target.enabled) return;
+
+          let targetBuffer: Uint8Array;
+
+          if (target.type === TargetType.INDIVIDUAL_ACCENT) {
+            // Find average color of mapped zone
+            const avgColor = getZoneAverage(target.mappedZone, W, H, data);
+            
+            // Replicate standard spot color for target's LED layout count
+            targetBuffer = new Uint8Array(target.accentLedCount * 3);
+            for (let i = 0; i < target.accentLedCount; i++) {
+              const o = i * 3;
+              targetBuffer[o] = avgColor.r;
+              targetBuffer[o + 1] = avgColor.g;
+              targetBuffer[o + 2] = avgColor.b;
+            }
+          } else {
+            // Ambilight LCD outer border mapping segments: Top, Right, Bottom, Left
+            const totalBacklightLeds = target.topLedCount + target.rightLedCount + target.bottomLedCount + target.leftLedCount;
+            targetBuffer = new Uint8Array(totalBacklightLeds * 3);
+            let ptr = 0;
+
+            // 1. Top Edge (Left to Right)
+            for (let i = 0; i < target.topLedCount; i++) {
+              const fraction = target.topLedCount === 1 ? 0.5 : i / (target.topLedCount - 1);
+              const pxColor = getPixelColor(fraction * (W - 1), 0, W, H, data);
+              targetBuffer[ptr++] = pxColor.r;
+              targetBuffer[ptr++] = pxColor.g;
+              targetBuffer[ptr++] = pxColor.b;
+            }
+
+            // 2. Right Edge (Top to Bottom)
+            for (let i = 0; i < target.rightLedCount; i++) {
+              const fraction = target.rightLedCount === 1 ? 0.5 : i / (target.rightLedCount - 1);
+              const pxColor = getPixelColor(W - 1, fraction * (H - 1), W, H, data);
+              targetBuffer[ptr++] = pxColor.r;
+              targetBuffer[ptr++] = pxColor.g;
+              targetBuffer[ptr++] = pxColor.b;
+            }
+
+            // 3. Bottom Edge (Right to Left)
+            for (let i = 0; i < target.bottomLedCount; i++) {
+              const fraction = target.bottomLedCount === 1 ? 0.5 : i / (target.bottomLedCount - 1);
+              const pxColor = getPixelColor((1 - fraction) * (W - 1), H - 1, W, H, data);
+              targetBuffer[ptr++] = pxColor.r;
+              targetBuffer[ptr++] = pxColor.g;
+              targetBuffer[ptr++] = pxColor.b;
+            }
+
+            // 4. Left Edge (Bottom to Top)
+            for (let i = 0; i < target.leftLedCount; i++) {
+              const fraction = target.leftLedCount === 1 ? 0.5 : i / (target.leftLedCount - 1);
+              const pxColor = getPixelColor(0, (1 - fraction) * (H - 1), W, H, data);
+              targetBuffer[ptr++] = pxColor.r;
+              targetBuffer[ptr++] = pxColor.g;
+              targetBuffer[ptr++] = pxColor.b;
+            }
+          }
+
+          newAuxPixels[target.id] = targetBuffer;
+
+          // Broadcast through relay
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            const auxPacket = {
+              ip: target.ipAddress,
+              port: target.port,
+              protocol: target.protocol,
+              pixels: Array.from(targetBuffer)
+            };
+            wsRef.current.send(JSON.stringify(auxPacket));
+
+            statsTracker.current.bytes += targetBuffer.length + 10;
+            statsTracker.current.packets += 1;
+          }
+        });
+
+        setAuxPixels(newAuxPixels);
+
         statsTracker.current.frames += 1;
       }
 
@@ -430,7 +689,7 @@ export default function App() {
         cancelAnimationFrame(animationFrameId.current);
       }
     };
-  }, [wledConfig, activeSource, activeEffect, isPlaying, socketStatus]);
+  }, [wledConfig, activeSource, activeEffect, isPlaying, socketStatus, auxiliaryTargets, useSimulatedNdi, ndiStreamUrl]);
 
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 flex flex-col font-sans">
@@ -516,6 +775,7 @@ export default function App() {
                     {src === SourceType.WEBCAM && <Video className="w-4 h-4 text-emerald-400" />}
                     {src === SourceType.SCREEN_CAPTURE && <Monitor className="w-4 h-4 text-amber-400" />}
                     {src === SourceType.YOUTUBE && <AppWindow className="w-4 h-4 text-rose-400" />}
+                    {src === SourceType.NDI_IP_STREAM && <Tv className="w-4 h-4 text-sky-400" />}
                     {src}
                   </span>
                   {activeSource === src && <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />}
@@ -641,6 +901,89 @@ export default function App() {
                       <strong className="text-zinc-200 block mt-1">Recommended Alternate Approach:</strong>
                       Open your YouTube video in a separate browser tab and select the <span className="text-amber-400">Screen/Window Capture</span> option above to capture the tab directly!
                     </p>
+                  </div>
+                </div>
+              )}
+
+              {activeSource === SourceType.NDI_IP_STREAM && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold text-zinc-500 uppercase">Input Feed Source</label>
+                    <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 select-none cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={useSimulatedNdi}
+                        onChange={(e) => setUseSimulatedNdi(e.target.checked)}
+                        className="rounded accent-orange-500 bg-zinc-900 border-zinc-800"
+                      />
+                      Preflight Test Wave
+                    </label>
+                  </div>
+
+                  {!useSimulatedNdi ? (
+                    <div className="space-y-1 bg-zinc-950 p-2.5 rounded border border-zinc-900">
+                      <label className="text-[9px] font-bold text-zinc-400 uppercase">Local MJPEG LAN URL</label>
+                      <input
+                        type="text"
+                        value={ndiStreamUrl}
+                        onChange={(e) => {
+                          setNdiStreamUrl(e.target.value);
+                          if (streamImgRef.current) {
+                            streamImgRef.current.src = e.target.value;
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs font-mono focus:outline-none"
+                        placeholder="http://192.168.1.50:8000/stream"
+                      />
+                      <span className="text-[8px] text-zinc-500 leading-normal block pt-1">
+                        Connects to local cameras or OBS-MJPEG plugin feeds directly in the sandbox.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="p-2 bg-orange-500/5 border border-orange-500/15 rounded-lg flex gap-2 items-start text-left">
+                      <Info className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
+                      <p className="text-[9.5px] text-zinc-400 leading-tight">
+                        <strong>Preflight test mode active.</strong> Feeds a modular color-bar sweeping bar pattern to easily examine mapping coordinates on your multi-segment light system!
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Hidden image proxy stream */}
+                  <img
+                    ref={streamImgRef}
+                    src={useSimulatedNdi ? undefined : ndiStreamUrl}
+                    className="hidden"
+                    crossOrigin="anonymous"
+                    onLoad={() => setIsPlaying(true)}
+                    onError={() => console.warn("MJPEG load failure")}
+                  />
+
+                  {/* Local Transmit Utility Instruction Manual */}
+                  <div className="border border-zinc-900/85 rounded-lg bg-zinc-950/40 p-3 space-y-2">
+                    <div className="flex items-center gap-1.5">
+                      <Tv className="w-3.5 h-3.5 text-sky-400" />
+                      <span className="text-[9px] font-extrabold text-[#f97316] uppercase tracking-wider">Local NDI / OBS Capture Bridge</span>
+                    </div>
+                    <p className="text-[9px] text-zinc-400 leading-normal">
+                      Raw NDI requires high-bandwidth transport. Run this lightweight Python capture daemon locally to stream any desktop or OBS capture into WLED:
+                    </p>
+                    <pre className="text-[8px] font-mono text-zinc-400 overflow-x-auto p-2 bg-black/90 rounded border border-zinc-900 leading-tight select-all">
+{`# 1. Install opencv: pip install opencv-python requests
+import cv2, requests, time
+
+cap = cv2.VideoCapture(0) # Camera or virtual stream index
+while True:
+    ret, frame = cap.read()
+    if not ret: continue
+    small = cv2.resize(frame, (16, 16))
+    _, jpeg = cv2.imencode('.jpg', small)
+    try:
+        # Pushes visual frames instantly to the applet
+        requests.post("http://localhost:3000/api/mjpeg-relay", 
+                      data=jpeg.tobytes(), timeout=0.1)
+    except Exception: pass
+    time.sleep(1/30)`}
+                    </pre>
                   </div>
                 </div>
               )}
@@ -800,6 +1143,198 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {/* 3. MULTI-OUTPUT ROUTER PANEL */}
+          <div className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm">
+            <div className="flex items-center justify-between mb-3.5">
+              <div>
+                <h2 className="text-xs font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
+                  <Sliders className="w-3.5 h-3.5 text-orange-400" />
+                  3. Multi-Output Router
+                </h2>
+                <p className="text-[10px] text-zinc-500">Route pixels to secondary controllers in real-time</p>
+              </div>
+              <button
+                onClick={handleAddAux}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-orange-500 hover:bg-orange-600 text-white text-[10px] font-semibold transition"
+              >
+                <Plus className="w-3 h-3" /> Add Light
+              </button>
+            </div>
+
+            <div className="space-y-3 max-h-[360px] overflow-y-auto pr-1 scrollbar-thin">
+              {auxiliaryTargets.map((target) => (
+                <div key={target.id} className="p-3 bg-zinc-950 rounded-lg border border-zinc-900 space-y-3 relative group/item">
+                  
+                  {/* Target Top Control Header */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 flex-1 mr-2">
+                      <input
+                        type="checkbox"
+                        checked={target.enabled}
+                        onChange={() => handleToggleAux(target.id)}
+                        className="rounded accent-orange-500 bg-zinc-900 border-zinc-800 cursor-pointer"
+                        title="Toggle Target stream broadcast"
+                      />
+                      
+                      {target.type === TargetType.AMBIENT_LIGHTPACK ? (
+                        <Tv className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                      ) : (
+                        <Lightbulb className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      )}
+
+                      <input
+                        type="text"
+                        value={target.name}
+                        onChange={(e) => handleUpdateAux(target.id, { name: e.target.value })}
+                        className="bg-transparent border-b border-transparent hover:border-zinc-800 focus:border-orange-500 focus:outline-none text-xs font-semibold text-zinc-200 py-0.5 w-full transition"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[8px] font-mono font-bold leading-none ${
+                        target.enabled 
+                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/10 animate-pulse'
+                          : 'bg-zinc-800 text-zinc-500'
+                      }`}>
+                        {target.enabled ? 'ACTIVE' : 'MUTED'}
+                      </span>
+                      
+                      <button
+                        onClick={() => handleRemoveAux(target.id)}
+                        className="p-1 rounded text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover/item:opacity-100 focus:opacity-100"
+                        title="Remove Target"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Expand configuration list */}
+                  <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-zinc-900/40">
+                    {/* IP Field */}
+                    <div>
+                      <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">IP Address</span>
+                      <input
+                        type="text"
+                        value={target.ipAddress}
+                        onChange={(e) => handleUpdateAux(target.id, { ipAddress: e.target.value })}
+                        className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10px] font-mono focus:outline-none focus:ring-1 focus:ring-orange-500"
+                      />
+                    </div>
+
+                    {/* Protocol Selector */}
+                    <div>
+                      <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Protocol</span>
+                      <select
+                        value={target.protocol}
+                        onChange={(e) => {
+                          const proto = e.target.value as SyncProtocol;
+                          let port = 21324;
+                          if (proto === SyncProtocol.DDP) port = 4048;
+                          if (proto === SyncProtocol.E131) port = 5568;
+                          if (proto === SyncProtocol.ARTNET) port = 6454;
+                          handleUpdateAux(target.id, { protocol: proto, port });
+                        }}
+                        className="w-full px-1.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10px] focus:outline-none"
+                      >
+                        {Object.values(SyncProtocol).map(p => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Geometry specific sub-sections */}
+                  {target.type === TargetType.AMBIENT_LIGHTPACK ? (
+                    <div className="bg-zinc-900/60 p-2 rounded border border-zinc-900/80 space-y-2">
+                      <span className="text-[8px] font-extrabold text-zinc-400 uppercase tracking-wider block">LCD Border segment LED Counts</span>
+                      <div className="grid grid-cols-4 gap-1">
+                        <div>
+                          <span className="text-[7.5px] font-bold text-zinc-500 text-center block mb-0.5">Top</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={target.topLedCount}
+                            onChange={(e) => handleUpdateAux(target.id, { topLedCount: Math.max(0, Number(e.target.value)) })}
+                            className="w-full p-1 bg-zinc-950 border border-zinc-800 text-center rounded text-[10px] font-mono text-zinc-200"
+                          />
+                        </div>
+                        <div>
+                          <span className="text-[7.5px] font-bold text-zinc-500 text-center block mb-0.5">Right</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={target.rightLedCount}
+                            onChange={(e) => handleUpdateAux(target.id, { rightLedCount: Math.max(0, Number(e.target.value)) })}
+                            className="w-full p-1 bg-zinc-950 border border-zinc-800 text-center rounded text-[10px] font-mono text-zinc-200"
+                          />
+                        </div>
+                        <div>
+                          <span className="text-[7.5px] font-bold text-zinc-500 text-center block mb-0.5">Bottom</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={target.bottomLedCount}
+                            onChange={(e) => handleUpdateAux(target.id, { bottomLedCount: Math.max(0, Number(e.target.value)) })}
+                            className="w-full p-1 bg-zinc-950 border border-zinc-800 text-center rounded text-[10px] font-mono text-zinc-200"
+                          />
+                        </div>
+                        <div>
+                          <span className="text-[7.5px] font-bold text-zinc-500 text-center block mb-0.5">Left</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={target.leftLedCount}
+                            onChange={(e) => handleUpdateAux(target.id, { leftLedCount: Math.max(0, Number(e.target.value)) })}
+                            className="w-full p-1 bg-zinc-950 border border-zinc-800 text-center rounded text-[10px] font-mono text-zinc-200"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2 bg-zinc-900/60 p-2 rounded border border-zinc-900/80">
+                      <div>
+                        <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Mapping Source Zone</span>
+                        <select
+                          value={target.mappedZone}
+                          onChange={(e) => handleUpdateAux(target.id, { mappedZone: e.target.value as AccentMappingZone })}
+                          className="w-full px-1 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-200 text-[10px] focus:outline-none"
+                        >
+                          {Object.values(AccentMappingZone).map(z => (
+                            <option key={z} value={z}>{z}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Glow LED Count</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="300"
+                          value={target.accentLedCount}
+                          onChange={(e) => handleUpdateAux(target.id, { accentLedCount: Math.max(1, Number(e.target.value)) })}
+                          className="w-full px-2 py-1 bg-zinc-950 border border-zinc-800 rounded text-[10px] font-mono text-zinc-200"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+              ))}
+
+              {auxiliaryTargets.length === 0 && (
+                <div className="py-6 text-center text-zinc-500 text-[11px] leading-normal border border-dashed border-zinc-800 rounded-lg">
+                  No auxiliary Outputs configured.<br />
+                  Click <strong>Add Light</strong> up top to link a desk spotlights or cabinet lamps!
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
 
@@ -870,7 +1405,12 @@ export default function App() {
 
           {/* ACTIVE HARDWARE EMULATOR */}
           <div className="bg-[#121214] rounded-xl border border-zinc-900 p-5 shadow-sm flex-1">
-            <WLEDEmulator pixels={simulatedPixels} config={wledConfig} />
+            <WLEDEmulator
+              pixels={simulatedPixels}
+              config={wledConfig}
+              auxTargets={auxiliaryTargets}
+              auxPixels={auxPixels}
+            />
           </div>
         </section>
 
@@ -999,7 +1539,7 @@ export default function App() {
               <div className="mt-2 text-[9px] text-zinc-500 font-sans leading-normal leading-relaxed text-center py-2 border-t border-zinc-900 flex gap-2 items-start text-left">
                 <AlertCircle className="w-3.5 h-3.5 text-zinc-600 mt-0.5 shrink-0" />
                 <span>
-                  <strong>Setup Notice:</strong> WLED real-time streaming requires WLED setting "Realtime - Receive UDP" to be active on port 4048 (DDP) or 21324 (DRGB).
+                  <strong>Setup Notice:</strong> Ensure "Realtime - Receive UDP" is active in WLED. Protocol default ports: DDP (4048), sACN/E1.31 (5568), Art-Net (6454), and DRGB/WARLS (21324).
                 </span>
               </div>
             </div>
