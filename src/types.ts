@@ -51,6 +51,7 @@ export interface AuxiliaryTarget {
   ipAddress: string;
   port: number;
   protocol: SyncProtocol;
+  universe?: number;
   
   // Ambilight LCD parameters
   topLedCount: number;

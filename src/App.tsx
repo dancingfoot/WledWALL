@@ -170,6 +170,7 @@ export default function App() {
       ipAddress: '192.168.1.101',
       port: 5568,
       protocol: SyncProtocol.E131,
+      universe: 1,
       topLedCount: 12,
       rightLedCount: 8,
       bottomLedCount: 12,
@@ -185,6 +186,7 @@ export default function App() {
       ipAddress: '192.168.1.102',
       port: 4048,
       protocol: SyncProtocol.DDP,
+      universe: 0,
       topLedCount: 0,
       rightLedCount: 0,
       bottomLedCount: 0,
@@ -264,6 +266,7 @@ export default function App() {
       ipAddress: '192.168.1.115',
       port: 4048,
       protocol: SyncProtocol.DDP,
+      universe: 0,
       topLedCount: 0,
       rightLedCount: 0,
       bottomLedCount: 0,
@@ -803,6 +806,7 @@ export default function App() {
               ip: target.ipAddress,
               port: target.port,
               protocol: target.protocol,
+              universe: target.universe,
               pixels: Array.from(targetBuffer)
             };
             wsRef.current.send(JSON.stringify(auxPacket));
@@ -1599,7 +1603,7 @@ while True:
                   </div>
 
                   {/* Expand configuration list */}
-                  <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-zinc-900/40">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs pt-2 border-t border-zinc-900/40">
                     {/* IP Field */}
                     <div>
                       <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">IP Address</span>
@@ -1622,7 +1626,8 @@ while True:
                           if (proto === SyncProtocol.DDP) port = 4048;
                           if (proto === SyncProtocol.E131) port = 5568;
                           if (proto === SyncProtocol.ARTNET) port = 6454;
-                          handleUpdateAux(target.id, { protocol: proto, port });
+                          const universe = proto === SyncProtocol.E131 ? 1 : 0;
+                          handleUpdateAux(target.id, { protocol: proto, port, universe });
                         }}
                         className="w-full px-1.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10px] focus:outline-none"
                       >
@@ -1630,6 +1635,32 @@ while True:
                           <option key={p} value={p}>{p}</option>
                         ))}
                       </select>
+                    </div>
+
+                    {/* Port Field */}
+                    <div>
+                      <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Port</span>
+                      <input
+                        type="number"
+                        value={target.port}
+                        onChange={(e) => handleUpdateAux(target.id, { port: Number(e.target.value) })}
+                        className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10px] font-mono focus:outline-none focus:ring-1 focus:ring-orange-500"
+                      />
+                    </div>
+
+                    {/* Universe Field */}
+                    <div>
+                      <span className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Universe</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="63999"
+                        disabled={target.protocol !== SyncProtocol.ARTNET && target.protocol !== SyncProtocol.E131}
+                        value={target.universe !== undefined ? target.universe : (target.protocol === SyncProtocol.E131 ? 1 : 0)}
+                        onChange={(e) => handleUpdateAux(target.id, { universe: Number(e.target.value) })}
+                        className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10px] font-mono focus:outline-none focus:ring-1 focus:ring-orange-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                        placeholder="N/A"
+                      />
                     </div>
                   </div>
 
