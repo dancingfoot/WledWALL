@@ -31,7 +31,7 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('message', (message: string) => {
     try {
       const data = JSON.parse(message);
-      const { ip, port, protocol, pixels } = data;
+      const { ip, port, protocol, pixels, universe } = data;
 
       if (!ip || !pixels || !Array.isArray(pixels)) return;
 
@@ -116,7 +116,9 @@ wss.on('connection', (ws: WebSocket) => {
         artHeader.writeUInt16BE(14, 10); // Proto Version
         artHeader.writeUInt8(artnetSeq, 12); // Sequence
         artHeader.writeUInt8(0, 13); // Physical port
-        artHeader.writeUInt16LE(0, 14); // Universe index (0)
+
+        const targetArtnetUniverse = typeof universe === 'number' ? universe : 0;
+        artHeader.writeUInt16LE(targetArtnetUniverse, 14); // Dynamic Art-Net universe index
 
         // Art-Net universes support up to 512 channels. Crop the channels to 512.
         const channelCount = Math.min(pixels.length, 512);
@@ -151,7 +153,9 @@ wss.on('connection', (ws: WebSocket) => {
         e131Header.writeUInt16BE(0x0000, 109); // Synchronization Address (0 to disable)
         e131Header.writeUInt8(e131Seq, 111); // Sequence Number
         e131Header.writeUInt8(0, 112); // Options
-        e131Header.writeUInt16BE(1, 113); // Universe (Default inside WLED is 1)
+
+        const targetSacnUniverse = typeof universe === 'number' ? universe : 1;
+        e131Header.writeUInt16BE(targetSacnUniverse, 113); // Dynamic sACN Universe index (WLED Default is 1)
 
         // --- DMP Layer ---
         e131Header.writeUInt16BE(0x7000 | (11 + channels), 115); // Flags & Length (DMP Layer)

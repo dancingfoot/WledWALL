@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, ChangeEvent } from 'react';
-import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye } from 'lucide-react';
-import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget } from './types';
+import { Play, Pause, RefreshCw, Upload, Video, Monitor, AppWindow, Settings, Sliders, Activity, Info, AlertCircle, Wifi, WifiOff, Volume2, Lightbulb, Tv, Trash2, Plus, Copy, Check, Eye, Edit3, Search } from 'lucide-react';
+import { WLEDConfig, SyncProtocol, SourceType, EffectType, FrameStats, TargetType, AccentMappingZone, AuxiliaryTarget, NdiStreamInput } from './types';
 import WLEDEmulator from './components/WLEDEmulator';
 import { renderProceduralEffect } from './utils/proceduralEffects';
 
@@ -91,6 +91,15 @@ export default function App() {
     blur: 0,
     fpsLimit: 30,
     timeout: 2,
+    universe: 1,
+  });
+
+  const [protocolPorts, setProtocolPorts] = useState<{ [key in SyncProtocol]: number }>({
+    [SyncProtocol.DDP]: 4048,
+    [SyncProtocol.DRGB]: 21324,
+    [SyncProtocol.WARLS]: 21324,
+    [SyncProtocol.ARTNET]: 6454,
+    [SyncProtocol.E131]: 5568,
   });
 
   // ---- Player & Video States ----
@@ -108,6 +117,49 @@ export default function App() {
   const [ndiStreamUrl, setNdiStreamUrl] = useState<string>('http://192.168.1.150:8080/video');
   const [useSimulatedNdi, setUseSimulatedNdi] = useState<boolean>(true);
   const streamImgRef = useRef<HTMLImageElement | null>(null);
+
+  const [ndiInputs, setNdiInputs] = useState<NdiStreamInput[]>([
+    {
+      id: 'ndi-obs-program',
+      name: 'OBS DistroAV - Program Out',
+      sourceName: 'GAMING-DESKTOP (OBS - DistroAV Master)',
+      ipAddress: '192.168.1.150',
+      port: 5961,
+      url: 'http://192.168.1.150:8080/video',
+      enabled: true,
+      resolution: '1920x1080',
+      fps: 60,
+      status: 'ONLINE'
+    },
+    {
+      id: 'ndi-obs-camera',
+      name: 'OBS DistroAV - Live Camera',
+      sourceName: 'CAM-PODIUM (OBS - DistroAV Stage Mirror)',
+      ipAddress: '192.168.1.152',
+      port: 5961,
+      url: 'http://192.168.1.152:8080/video',
+      enabled: false,
+      resolution: '1280x720',
+      fps: 30,
+      status: 'ONLINE'
+    },
+    {
+      id: 'ndi-cam-hx',
+      name: 'Studio Cam HX Output',
+      sourceName: 'STUDIO-CAM-A (NDI HX Camera)',
+      ipAddress: '192.168.1.112',
+      port: 5961,
+      url: 'http://192.168.1.112:8554/stream',
+      enabled: false,
+      resolution: '3840x2160',
+      fps: 59,
+      status: 'OFFLINE'
+    }
+  ]);
+  const [selectedNdiId, setSelectedNdiId] = useState<string>('ndi-obs-program');
+  const [isScanningNdi, setIsScanningNdi] = useState<boolean>(false);
+  const [scanLogs, setScanLogs] = useState<string[]>([]);
+
 
   const [auxiliaryTargets, setAuxiliaryTargets] = useState<AuxiliaryTarget[]>([
     {
@@ -177,16 +229,20 @@ export default function App() {
     lastSecTime: 0,
   });
 
+  const lastUiUpdateRef = useRef<number>(0);
+
   const [simulatedPixels, setSimulatedPixels] = useState<Uint8Array>(new Uint8Array(256 * 3));
 
   // Auto-set standard ports upon protocol changes
   const handleProtocolChange = (protocol: SyncProtocol) => {
-    let port = 21324; // DRGB & WARLS
-    if (protocol === SyncProtocol.DDP) port = 4048;
-    if (protocol === SyncProtocol.ARTNET) port = 6454;
-    if (protocol === SyncProtocol.E131) port = 5568;
-    
-    setWledConfig(prev => ({ ...prev, protocol, port }));
+    const port = protocolPorts[protocol] !== undefined ? protocolPorts[protocol] : 21324;
+    const universe = protocol === SyncProtocol.E131 ? 1 : 0;
+    setWledConfig(prev => ({ ...prev, protocol, port, universe }));
+  };
+
+  const handlePortChange = (port: number) => {
+    setWledConfig(prev => ({ ...prev, port }));
+    setProtocolPorts(prev => ({ ...prev, [wledConfig.protocol]: port }));
   };
 
   // ---- Auxiliary State mutator handlers ----
@@ -221,6 +277,99 @@ export default function App() {
   const handleRemoveAux = (id: string) => {
     setAuxiliaryTargets(prev => prev.filter(t => t.id !== id));
   };
+
+  // ---- NDI Stream Input state mutators ----
+  const handleSelectNdi = (id: string) => {
+    setSelectedNdiId(id);
+    const target = ndiInputs.find(i => i.id === id);
+    if (target) {
+      setNdiStreamUrl(target.url);
+      setNdiInputs(prev => prev.map(item => ({
+        ...item,
+        enabled: item.id === id
+      })));
+      if (!useSimulatedNdi && streamImgRef.current) {
+        streamImgRef.current.src = target.url;
+      }
+    }
+  };
+
+  const handleUpdateNdi = (id: string, updates: Partial<NdiStreamInput>) => {
+    setNdiInputs(prev => prev.map(item => {
+      if (item.id === id) {
+        const next = { ...item, ...updates };
+        if (id === selectedNdiId && updates.url !== undefined) {
+          setNdiStreamUrl(updates.url);
+        }
+        return next;
+      }
+      return item;
+    }));
+  };
+
+  const handleAddNdi = () => {
+    const newId = `ndi-input-${Date.now()}`;
+    const newSource: NdiStreamInput = {
+      id: newId,
+      name: `Sourced Feed #${ndiInputs.length + 1}`,
+      sourceName: `USER-PC (DistroAV - Source #${ndiInputs.length + 1})`,
+      ipAddress: '192.168.1.150',
+      port: 5961 + ndiInputs.length,
+      url: `http://192.168.1.150:8080/video${ndiInputs.length + 1}`,
+      enabled: false,
+      resolution: '1920x1080',
+      fps: 60,
+      status: 'ONLINE'
+    };
+    setNdiInputs(prev => [...prev, newSource]);
+  };
+
+  const handleRemoveNdi = (id: string) => {
+    setNdiInputs(prev => {
+      const next = prev.filter(item => item.id !== id);
+      if (id === selectedNdiId && next.length > 0) {
+        // Switch selected NDI to first available
+        setSelectedNdiId(next[0].id);
+        setNdiStreamUrl(next[0].url);
+      }
+      return next;
+    });
+  };
+
+  const handleScanNdiNetwork = () => {
+    if (isScanningNdi) return;
+    setIsScanningNdi(true);
+    setScanLogs([]);
+
+    const logPoints = [
+      '⚡ Initializing Multicast mDNS discovery on LAN (Port 5353)...',
+      '🔍 Querying pointer records for NDI: _ndi._tcp.local...',
+      '📡 Query broadcast routed through gateway local interface...',
+      '📥 Received mDNS A-record from 192.168.1.150 (Host: DESKTOP-PC)',
+      '✅ DistroAV Program stream resolved [DESKTOP-GAMING (DistroAV - Program)]',
+      '✅ DistroAV Preview stream resolved [DESKTOP-GAMING (DistroAV - Preview)]',
+      '📥 Received mDNS A-record from 192.168.1.152 (Host: CAM-PODIUM)',
+      '✅ DistroAV Camera resolved [CAM-PODIUM (DistroAV Stage Mirror)]',
+      '🎉 NDI discovery completed. Found 3 sources active on local subnet!'
+    ];
+
+    logPoints.forEach((msg, idx) => {
+      setTimeout(() => {
+        setScanLogs(prev => [...prev, msg]);
+        if (idx === logPoints.length - 1) {
+          setIsScanningNdi(false);
+          // Set all existing preset sources to ONLINE status during simulation
+          setNdiInputs(prev => prev.map(item => {
+            if (item.id === 'ndi-obs-program' || item.id === 'ndi-obs-camera') {
+              return { ...item, status: 'ONLINE' };
+            }
+            return item;
+          }));
+        }
+      }, (idx + 1) * 600);
+    });
+  };
+
 
   // ---- WebSocket Connection Handler ----
   useEffect(() => {
@@ -318,6 +467,21 @@ export default function App() {
     }
   };
 
+  // ---- Play Video Safely ----
+  const playVideoSafe = () => {
+    if (!videoRef.current) return;
+    videoRef.current.play()
+      .then(() => {
+        setIsPlaying(true);
+      })
+      .catch((err) => {
+        // Discard AbortError since it's a completely expected part of switching sources or pausing
+        if (err.name !== 'AbortError') {
+          console.error('Failed to play media stream:', err);
+        }
+      });
+  };
+
   // ---- Video File Picker ----
   const handleVideoUpload = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -330,9 +494,7 @@ export default function App() {
       if (videoRef.current) {
         videoRef.current.src = url;
         videoRef.current.loop = true;
-        videoRef.current.play().then(() => {
-          setIsPlaying(true);
-        }).catch(err => console.error(err));
+        playVideoSafe();
       }
     }
   };
@@ -348,11 +510,7 @@ export default function App() {
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play().then(() => {
-          setIsPlaying(true);
-        }).catch(err => {
-          console.error('Play failing with:', err);
-        });
+        playVideoSafe();
       }
     } catch (err: any) {
       console.error('Webcam access error:', err);
@@ -371,11 +529,7 @@ export default function App() {
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play().then(() => {
-          setIsPlaying(true);
-        }).catch(err => {
-          console.error('Play fails:', err);
-        });
+        playVideoSafe();
       }
       // Listen for screensharing block end
       stream.getVideoTracks()[0].onended = () => {
@@ -394,9 +548,7 @@ export default function App() {
       videoRef.current.pause();
       setIsPlaying(false);
     } else {
-      videoRef.current.play().then(() => {
-        setIsPlaying(true);
-      }).catch(err => console.error(err));
+      playVideoSafe();
     }
   };
 
@@ -477,16 +629,24 @@ export default function App() {
             ctx.beginPath();
             ctx.arc(orbX, orbY, Math.max(1, W / 7), 0, Math.PI * 2);
             ctx.fill();
-          } else if (streamImgRef.current) {
-            ctx.drawImage(streamImgRef.current, 0, 0, W, H);
+          } else if (streamImgRef.current && streamImgRef.current.complete && streamImgRef.current.naturalWidth > 0) {
+            try {
+              ctx.drawImage(streamImgRef.current, 0, 0, W, H);
+            } catch (err) {
+              ctx.fillStyle = '#18181b';
+              ctx.fillRect(0, 0, W, H);
+            }
           } else {
             ctx.fillStyle = '#18181b';
             ctx.fillRect(0, 0, W, H);
           }
-        } else if (videoRef.current && isPlaying) {
-          const video = videoRef.current;
-          // Canvas fit adjustments
-          ctx.drawImage(video, 0, 0, W, H);
+        } else if (videoRef.current && isPlaying && videoRef.current.readyState >= 2) {
+          try {
+            ctx.drawImage(videoRef.current, 0, 0, W, H);
+          } catch (err) {
+            ctx.fillStyle = '#18181b';
+            ctx.fillRect(0, 0, W, H);
+          }
         } else {
           // Solid background idle glow placeholder color
           ctx.fillStyle = '#18181b';
@@ -557,14 +717,13 @@ export default function App() {
           }
         }
 
-        setSimulatedPixels(pixelBuffer);
-
         // 5. Transfer packet bytes to Node backend over socket
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           const packet = {
             ip: wledConfig.ipAddress,
             port: wledConfig.port,
             protocol: wledConfig.protocol,
+            universe: wledConfig.universe,
             pixels: Array.from(pixelBuffer)
           };
           wsRef.current.send(JSON.stringify(packet));
@@ -653,7 +812,13 @@ export default function App() {
           }
         });
 
-        setAuxPixels(newAuxPixels);
+        // Throttle React state updates to ~15 FPS to prevent browser visualizer lagging the page
+        const nowMs = performance.now();
+        if (nowMs - lastUiUpdateRef.current >= 66) {
+          lastUiUpdateRef.current = nowMs;
+          setSimulatedPixels(pixelBuffer);
+          setAuxPixels(newAuxPixels);
+        }
 
         statsTracker.current.frames += 1;
       }
@@ -906,9 +1071,13 @@ export default function App() {
               )}
 
               {activeSource === SourceType.NDI_IP_STREAM && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[10px] font-bold text-zinc-500 uppercase">Input Feed Source</label>
+                <div className="space-y-4">
+                  {/* Mode Toggles */}
+                  <div className="flex items-center justify-between border-b border-zinc-900 pb-2">
+                    <div>
+                      <h3 className="text-xs font-bold text-zinc-300">NDI Streams Routing Table</h3>
+                      <p className="text-[10px] text-zinc-500">List and manage active DistroAV streaming instances</p>
+                    </div>
                     <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 select-none cursor-pointer">
                       <input
                         type="checkbox"
@@ -916,36 +1085,190 @@ export default function App() {
                         onChange={(e) => setUseSimulatedNdi(e.target.checked)}
                         className="rounded accent-orange-500 bg-zinc-900 border-zinc-800"
                       />
-                      Preflight Test Wave
+                      Preflight Wave Pattern
                     </label>
                   </div>
 
-                  {!useSimulatedNdi ? (
-                    <div className="space-y-1 bg-zinc-950 p-2.5 rounded border border-zinc-900">
-                      <label className="text-[9px] font-bold text-zinc-400 uppercase">Local MJPEG LAN URL</label>
-                      <input
-                        type="text"
-                        value={ndiStreamUrl}
-                        onChange={(e) => {
-                          setNdiStreamUrl(e.target.value);
-                          if (streamImgRef.current) {
-                            streamImgRef.current.src = e.target.value;
-                          }
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs font-mono focus:outline-none"
-                        placeholder="http://192.168.1.50:8000/stream"
-                      />
-                      <span className="text-[8px] text-zinc-500 leading-normal block pt-1">
-                        Connects to local cameras or OBS-MJPEG plugin feeds directly in the sandbox.
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="p-2 bg-orange-500/5 border border-orange-500/15 rounded-lg flex gap-2 items-start text-left">
+                  {useSimulatedNdi && (
+                    <div className="p-2.5 bg-orange-500/5 border border-orange-500/15 rounded-lg flex gap-2.5 items-start text-left">
                       <Info className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
                       <p className="text-[9.5px] text-zinc-400 leading-tight">
-                        <strong>Preflight test mode active.</strong> Feeds a modular color-bar sweeping bar pattern to easily examine mapping coordinates on your multi-segment light system!
+                        <strong>Preflight test mode active.</strong> Pushes a highly visible color-bar and sweep sweep laser to align, verify, and sequence WLED mapping segments without streaming delay.
                       </p>
                     </div>
+                  )}
+
+                  {/* NDI CONTROLLER DIRECTORY LIST */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] font-extrabold text-zinc-400 uppercase tracking-wider flex items-center gap-1">
+                        <Search className="w-3 h-3 text-sky-400" />
+                        Interactive NDI / IP Inputs ({ndiInputs.length})
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={handleScanNdiNetwork}
+                          disabled={isScanningNdi}
+                          className="px-2 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 text-sky-400 text-[9px] font-bold flex items-center gap-1 disabled:opacity-50 transition"
+                        >
+                          <RefreshCw className={`w-2.5 h-2.5 ${isScanningNdi ? 'animate-spin' : ''}`} />
+                          Scan Network
+                        </button>
+                        <button
+                          onClick={handleAddNdi}
+                          className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-[9px] font-semibold flex items-center gap-1 transition"
+                        >
+                          <Plus className="w-2.5 h-2.5" /> Add Stream
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Scanner Terminal Log Panel */}
+                    {isScanningNdi && (
+                      <div className="p-2 rounded bg-black/90 border border-zinc-900 font-mono text-[8px] text-emerald-400 space-y-1 max-h-[110px] overflow-y-auto scrollbar-thin">
+                        <div className="text-[8px] text-zinc-500 border-b border-zinc-900 pb-1 mb-1 flex justify-between">
+                          <span>mDNS MULTICAST PROTOCOL SCANNER LOGS</span>
+                          <span className="animate-pulse">RUNNING...</span>
+                        </div>
+                        {scanLogs.map((log, i) => (
+                          <div key={i} className="leading-tight">{log}</div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1 scrollbar-thin">
+                      {ndiInputs.map((stream) => {
+                        const isSelected = selectedNdiId === stream.id;
+                        return (
+                          <div
+                            key={stream.id}
+                            onClick={() => handleSelectNdi(stream.id)}
+                            className={`p-2.5 rounded-lg border text-left cursor-pointer transition select-none flex items-center justify-between relative group/stream ${
+                              isSelected
+                                ? 'border-orange-500/60 bg-orange-500/[0.04]'
+                                : 'border-zinc-900 bg-zinc-950/40 hover:border-zinc-800 hover:bg-zinc-950/80'
+                            }`}
+                          >
+                            <div className="flex gap-2.5 items-center flex-1 mr-2 min-w-0">
+                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                stream.status === 'ONLINE' ? 'bg-emerald-400 shadow-[0_0_8px_1.5px_rgba(52,211,153,0.4)]' : 'bg-zinc-600'
+                              }`} />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[11px] font-extrabold text-zinc-100 truncate block">
+                                    {stream.name}
+                                  </span>
+                                  {isSelected && (
+                                    <span className="text-[7.5px] px-1 py-0.2 rounded bg-orange-500/20 text-orange-400 font-extrabold">
+                                      ACTIVE DRIVER
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-[9px] font-mono text-zinc-500 block truncate">
+                                  {stream.sourceName}
+                                </span>
+                                <span className="text-[8.5px] font-mono text-[#f97316] block mt-0.5">
+                                  {stream.ipAddress}:{stream.port} &mdash; {stream.resolution} ({stream.fps} fps)
+                                </span>
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemoveNdi(stream.id);
+                              }}
+                              className="p-1 rounded text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition opacity-0 group-hover/stream:opacity-100 focus:opacity-100 shrink-0"
+                              title="Delete source configuration"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })}
+
+                      {ndiInputs.length === 0 && (
+                        <div className="py-6 text-center text-zinc-600 text-[10px] leading-normal border border-dashed border-zinc-900 rounded-lg">
+                          No active NDI/IP sources linked.<br />
+                          Click <strong>Add Stream</strong> to route customized feeds to WLED!
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* ACTIVE STREAM CONFIG EDITOR CARD */}
+                  {ndiInputs.length > 0 && (
+                    (() => {
+                      const activeItem = ndiInputs.find(i => i.id === selectedNdiId) || ndiInputs[0];
+                      return (
+                        <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-900 space-y-3 pt-2.5">
+                          <div className="flex justify-between items-center border-b border-zinc-900pb-1.5">
+                            <span className="text-[8px] font-black text-zinc-400 uppercase tracking-widest flex items-center gap-1">
+                              <Edit3 className="w-3 h-3 text-orange-400" />
+                              Configure Stream Parameters
+                            </span>
+                            <span className="text-[8px] font-mono text-zinc-500 uppercase">{activeItem.name}</span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Custom Feed Alias</label>
+                              <input
+                                type="text"
+                                value={activeItem.name}
+                                onChange={(e) => handleUpdateNdi(activeItem.id, { name: e.target.value })}
+                                className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10.5px] focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">mDNS Source Name</label>
+                              <input
+                                type="text"
+                                value={activeItem.sourceName}
+                                onChange={(e) => handleUpdateNdi(activeItem.id, { sourceName: e.target.value })}
+                                className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10.5px] font-mono focus:outline-none"
+                                placeholder="OBS-PC (DistroAV Master)"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2">
+                            <div className="col-span-2">
+                              <label className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">Stream LAN IP</label>
+                              <input
+                                type="text"
+                                value={activeItem.ipAddress}
+                                onChange={(e) => handleUpdateNdi(activeItem.id, { ipAddress: e.target.value })}
+                                className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10.5px] font-mono focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">NDI Port</label>
+                              <input
+                                type="number"
+                                value={activeItem.port}
+                                onChange={(e) => handleUpdateNdi(activeItem.id, { port: Number(e.target.value) })}
+                                className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10.5px] font-mono focus:outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="text-[8px] font-bold text-zinc-500 uppercase block mb-0.5">DistroAV / Local MJPEG LAN Stream URL</label>
+                            <input
+                              type="text"
+                              value={activeItem.url}
+                              onChange={(e) => handleUpdateNdi(activeItem.id, { url: e.target.value })}
+                              className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-[10.5px] font-mono focus:outline-none focus:ring-1 focus:ring-orange-500"
+                              placeholder="http://192.168.1.150:8080/video"
+                            />
+                            <span className="text-[8px] text-zinc-500 block leading-tight pt-1">
+                              Connects to local cameras, OBS NDI plugins, or DistroAV MJPEG stream feeds.
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()
                   )}
 
                   {/* Hidden image proxy stream */}
@@ -962,23 +1285,23 @@ export default function App() {
                   <div className="border border-zinc-900/85 rounded-lg bg-zinc-950/40 p-3 space-y-2">
                     <div className="flex items-center gap-1.5">
                       <Tv className="w-3.5 h-3.5 text-sky-400" />
-                      <span className="text-[9px] font-extrabold text-[#f97316] uppercase tracking-wider">Local NDI / OBS Capture Bridge</span>
+                      <span className="text-[9px] font-extrabold text-[#f97316] uppercase tracking-wider">Local OBS DistroAV mDNS Setup</span>
                     </div>
                     <p className="text-[9px] text-zinc-400 leading-normal">
-                      Raw NDI requires high-bandwidth transport. Run this lightweight Python capture daemon locally to stream any desktop or OBS capture into WLED:
+                      The DistroAV (obs-ndi) plugin transmits real-time video over local networks. Use this fast desktop capture bridge to relay your active OBS canvas instantly:
                     </p>
                     <pre className="text-[8px] font-mono text-zinc-400 overflow-x-auto p-2 bg-black/90 rounded border border-zinc-900 leading-tight select-all">
 {`# 1. Install opencv: pip install opencv-python requests
 import cv2, requests, time
 
-cap = cv2.VideoCapture(0) # Camera or virtual stream index
+cap = cv2.VideoCapture(0) # Camera/OBS virtual feed
 while True:
     ret, frame = cap.read()
     if not ret: continue
     small = cv2.resize(frame, (16, 16))
     _, jpeg = cv2.imencode('.jpg', small)
     try:
-        # Pushes visual frames instantly to the applet
+        # Relays raw stream dynamically inside WLED applet structure
         requests.post("http://localhost:3000/api/mjpeg-relay", 
                       data=jpeg.tobytes(), timeout=0.1)
     except Exception: pass
@@ -1029,9 +1352,74 @@ while True:
                   <input
                     type="number"
                     value={wledConfig.port}
-                    onChange={(e) => setWledConfig(prev => ({ ...prev, port: Number(e.target.value) }))}
+                    onChange={(e) => handlePortChange(Number(e.target.value))}
                     className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs focus:outline-none font-mono"
                   />
+                </div>
+              </div>
+
+              {/* Universe Field for DMX Protocols (Art-Net / e131) */}
+              {(wledConfig.protocol === SyncProtocol.ARTNET || wledConfig.protocol === SyncProtocol.E131) && (
+                <div>
+                  <span className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] font-bold text-zinc-500 uppercase block">
+                      DMX Universe Mapping
+                    </label>
+                    <span className="text-[9px] text-zinc-500 font-mono">WLED Dev Standard: {wledConfig.protocol === SyncProtocol.E131 ? '1' : '0'}</span>
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="63999"
+                    value={wledConfig.universe !== undefined ? wledConfig.universe : (wledConfig.protocol === SyncProtocol.E131 ? 1 : 0)}
+                    onChange={(e) => setWledConfig(prev => ({ ...prev, universe: Number(e.target.value) }))}
+                    className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none focus:border-transparent font-mono"
+                  />
+                </div>
+              )}
+
+              {/* Protocol port customize list */}
+              <div className="bg-zinc-950/80 p-3 rounded border border-zinc-850 space-y-2.5">
+                <span className="text-[9px] font-extrabold text-zinc-400 uppercase tracking-widest block">
+                  Per-Protocol Custom Ports
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.values(SyncProtocol).map((proto) => {
+                    const isCurrent = wledConfig.protocol === proto;
+                    return (
+                      <div
+                        key={proto}
+                        className={`flex items-center justify-between p-2 rounded border text-[10.5px] font-mono ${
+                          isCurrent
+                            ? 'bg-orange-950/15 border-orange-500/25'
+                            : 'bg-zinc-900/30 border-zinc-900/40'
+                        }`}
+                      >
+                        <span className={`truncate mr-1 ${isCurrent ? 'text-orange-400 font-bold' : 'text-zinc-500'}`}>
+                          {proto}
+                        </span>
+                        <input
+                          type="number"
+                          value={protocolPorts[proto]}
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            setProtocolPorts(prev => {
+                              const updated = { ...prev, [proto]: val };
+                              if (wledConfig.protocol === proto) {
+                                setWledConfig(c => ({ ...c, port: val }));
+                              }
+                              return updated;
+                            });
+                          }}
+                          className={`w-14 px-1 py-0.5 text-right rounded font-mono text-[11px] focus:outline-none ${
+                            isCurrent
+                              ? 'bg-orange-950/45 border-orange-500/20 text-orange-200 focus:ring-1 focus:ring-orange-500'
+                              : 'bg-zinc-950 border-zinc-800/80 text-zinc-400 focus:border-zinc-700'
+                          }`}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 

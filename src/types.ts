@@ -81,6 +81,7 @@ export interface WLEDConfig {
   blur: number; // Blur radius
   fpsLimit: number;
   timeout: number; // 2 seconds
+  universe?: number; // Optional universe field (Defaults: Art-Net=0, sACN=1)
 }
 
 export interface FrameStats {
@@ -90,3 +91,17 @@ export interface FrameStats {
   packetsSent: number;
   latencyMs: number;
 }
+
+export interface NdiStreamInput {
+  id: string;
+  name: string;
+  sourceName: string; // e.g. "OBS-DESKTOP (Distro AV - Program)"
+  ipAddress: string;
+  port: number;
+  url: string;
+  enabled: boolean;
+  resolution: string;
+  fps: number;
+  status: 'ONLINE' | 'OFFLINE' | 'DISCOVERING';
+}
+
